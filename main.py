@@ -3,7 +3,7 @@ import base64
 import json
 import sys
 import re
-import time  # NEW: For the polling loop
+import time  # For the polling loop
 import openai
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# NEW: Added gmail.labels scope to manage labels
+# Added gmail.labels scope to manage labels
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.labels"]
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -50,7 +50,7 @@ def get_gmail_service():
                 creds.refresh(Request())
             except Exception as e:
                 print(f"Token refresh failed: {e}. Deleting token.json for re-authentication.")
-                os.remove("token.json")  # NEW: Delete bad token
+                os.remove("token.json")  # Delete bad token
                 creds = None  # Force re-auth
         
         if not creds:  # Run auth flow if no creds or refresh failed
@@ -62,7 +62,6 @@ def get_gmail_service():
             
     return build("gmail", "v1", credentials=creds)
 
-# NEW: Helper function to find a label by name or create it
 def get_or_create_label_id(service, label_name):
     """Finds a label ID by name. If it doesn't exist, creates it."""
     try:
@@ -75,6 +74,7 @@ def get_or_create_label_id(service, label_name):
         
         # Label not found, create it
         print(f"Label '{label_name}' not found. Creating it...")
+        # CORRECTED LINE: messageListVisibility must be 'show'
         label_body = {'name': label_name, 'labelListVisibility': 'labelShow', 'messageListVisibility': 'show'}
         created_label = service.users().labels().create(userId='me', body=label_body).execute()
         print(f"Label created with ID: {created_label['id']}")
@@ -135,7 +135,7 @@ def fetch_unread_emails(service, label_config):
     """
     Fetches unread emails, EXCLUDING any that have already been processed by the bot.
     """
-    # NEW: Build a query to exclude emails we've already labeled
+    # Build a query to exclude emails we've already labeled
     labels_to_exclude = " ".join([f"-label:\"{name}\"" for name in label_config.values()])
     query = f"is:unread {labels_to_exclude}"
     print(f"Searching with query: {query}")
@@ -163,6 +163,7 @@ def fetch_unread_emails(service, label_config):
 def determine_user_intent(last_message_content, config):
     """
     Uses OpenAI to classify the user's intent. Robustly checks response.
+    UPDATED: Includes "follow_up" check.
     """
     print("Determining user intent...")
     intent_prompt_template = config['prompts']['intent_classifier']
@@ -182,6 +183,8 @@ def determine_user_intent(last_message_content, config):
             clean_intent = "escalation_request"
         elif "question" in raw_intent_output:
             clean_intent = "question"
+        elif "follow_up" in raw_intent_output:  # <-- UPGRADE 2 LOGIC
+            clean_intent = "follow_up"
         elif "other" in raw_intent_output:
             clean_intent = "other"
 
@@ -247,7 +250,6 @@ def forward_email_to_support(service, user_email, subject, full_conversation_tex
     except HttpError as error:
         print(f"An error occurred while forwarding email: {error}")
 
-# NEW: Replaces mark_as_read. This function marks as read AND applies a label in one API call.
 def modify_message(service, msg_id, add_label_id):
     """Marks an email as read and applies a specified label."""
     try:
@@ -259,7 +261,6 @@ def modify_message(service, msg_id, add_label_id):
     except HttpError as error:
         print(f"An error occurred while modifying message: {error}")
 
-# NEW: This function holds the core logic that used to be in main().
 def process_email_batch(service, config, label_ids):
     """Fetches and processes one batch of unread emails."""
     print("\nStarting Smart Agent Brain... Checking for new messages.")
@@ -283,6 +284,7 @@ def process_email_batch(service, config, label_ids):
 
         label_to_apply = None
 
+        # UPDATED: Includes the new "follow_up" case
         match intent:
             case "question":
                 print("Action: Generating AI reply.")
@@ -298,6 +300,10 @@ def process_email_batch(service, config, label_ids):
                 send_email(service, email['from'], email['subject'], confirm_text, email['threadId'])
                 label_to_apply = label_ids['escalated']
 
+            case "follow_up":  # <-- UPGRADE 2 LOGIC
+                print("Action: Follow-up detected (e.g., 'Thanks'). Marking as read and applying 'ignored' label.")
+                label_to_apply = label_ids['ignored']
+
             case "other":
                 print("Action: Intent is 'other' (e.g., spam, feedback). Marking as read and ignoring.")
                 label_to_apply = label_ids['ignored']
@@ -306,19 +312,19 @@ def process_email_batch(service, config, label_ids):
                 print(f"Action: Unknown intent '{intent}'. Defaulting to ignore.")
                 label_to_apply = label_ids['ignored']
 
-        # NEW: Apply the correct label and mark as read
         if label_to_apply:
             modify_message(service, email['id'], label_to_apply)
         
         print(f"--- Finished processing email {email['id']} ---")
 
 
-# NEW: The main() function is now a launcher and a persistent loop
 def main():
+    """
+    Main function to run the bot: sets up config, auth, labels, and starts the infinite polling loop.
+    """
     config = load_config()
     service = get_gmail_service()
     
-    # NEW: On startup, get the IDs for our labels
     print("Setting up Gmail labels...")
     label_ids = {
         "replied": get_or_create_label_id(service, config['labels']['replied']),
@@ -329,7 +335,6 @@ def main():
     
     interval = config['settings']['polling_interval_seconds']
     
-    # NEW: This is the main bot loop
     try:
         while True:
             process_email_batch(service, config, label_ids)
