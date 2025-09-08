@@ -1,8 +1,9 @@
 import os.path
 import base64
-import json  # Import json to read the config file
+import json
 import sys
 import re
+import time  # NEW: For the polling loop
 import openai
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
@@ -14,8 +15,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
-# SUPPORT_EMAIL has been moved to config.json
+# NEW: Added gmail.labels scope to manage labels
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.labels"]
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 if not openai.api_key:
@@ -32,7 +33,6 @@ def load_config():
         return config
     except FileNotFoundError:
         print("ERROR: config.json not found.")
-        print("Please create a config.json file based on the documentation.")
         sys.exit(1)
     except json.JSONDecodeError:
         print("ERROR: config.json is not valid JSON.")
@@ -46,8 +46,14 @@ def get_gmail_service():
     
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"Token refresh failed: {e}. Deleting token.json for re-authentication.")
+                os.remove("token.json")  # NEW: Delete bad token
+                creds = None  # Force re-auth
+        
+        if not creds:  # Run auth flow if no creds or refresh failed
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
         
@@ -55,6 +61,28 @@ def get_gmail_service():
             token.write(creds.to_json())
             
     return build("gmail", "v1", credentials=creds)
+
+# NEW: Helper function to find a label by name or create it
+def get_or_create_label_id(service, label_name):
+    """Finds a label ID by name. If it doesn't exist, creates it."""
+    try:
+        results = service.users().labels().list(userId='me').execute()
+        labels = results.get('labels', [])
+        
+        for label in labels:
+            if label['name'].lower() == label_name.lower():
+                return label['id']
+        
+        # Label not found, create it
+        print(f"Label '{label_name}' not found. Creating it...")
+        label_body = {'name': label_name, 'labelListVisibility': 'labelShow', 'messageListVisibility': 'show'}
+        created_label = service.users().labels().create(userId='me', body=label_body).execute()
+        print(f"Label created with ID: {created_label['id']}")
+        return created_label['id']
+        
+    except HttpError as error:
+        print(f"An error occurred managing labels: {error}")
+        sys.exit(1)
 
 def get_body_from_message(message_part):
     """Decodes and extracts the email body from a message part."""
@@ -91,7 +119,6 @@ def fetch_thread_history(service, thread_id):
             role = 'assistant' if sender_email == my_email else 'user'
             body = get_body_from_message(msg['payload'])
 
-            # Clean previous bot replies to only keep the core message
             if role == 'assistant':
                 body = body.split("\n\n---")[0].strip()
 
@@ -104,12 +131,20 @@ def fetch_thread_history(service, thread_id):
         print(f"An error occurred fetching thread: {error}")
         return [], ""
 
-def fetch_unread_emails(service):
-    """Fetches the metadata for unread emails."""
+def fetch_unread_emails(service, label_config):
+    """
+    Fetches unread emails, EXCLUDING any that have already been processed by the bot.
+    """
+    # NEW: Build a query to exclude emails we've already labeled
+    labels_to_exclude = " ".join([f"-label:\"{name}\"" for name in label_config.values()])
+    query = f"is:unread {labels_to_exclude}"
+    print(f"Searching with query: {query}")
+    
     try:
-        result = service.users().messages().list(userId="me", labelIds=['INBOX'], q="is:unread").execute()
+        result = service.users().messages().list(userId="me", labelIds=['INBOX'], q=query).execute()
         messages = result.get('messages', [])
-        if not messages: return []
+        if not messages: 
+            return []
 
         email_data = []
         for msg_summary in messages:
@@ -122,17 +157,14 @@ def fetch_unread_emails(service):
             })
         return email_data
     except HttpError as error:
-        print(f"An error occurred: {error}")
+        print(f"An error occurred fetching emails: {error}")
         return []
 
 def determine_user_intent(last_message_content, config):
     """
-    Uses OpenAI to classify the user's intent. This is the 'Agent Brain'.
-    This function is robust and searches the AI response for keywords.
+    Uses OpenAI to classify the user's intent. Robustly checks response.
     """
     print("Determining user intent...")
-    
-    # Load prompt from config and inject the email content
     intent_prompt_template = config['prompts']['intent_classifier']
     intent_prompt = intent_prompt_template.format(last_message_content=last_message_content)
     
@@ -143,15 +175,9 @@ def determine_user_intent(last_message_content, config):
             max_tokens=config['settings']['max_intent_tokens'],
             temperature=0
         )
-        # Get the raw response and clean it
         raw_intent_output = response.choices[0].message.content.strip().lower().replace("\"", "")
         
-        # --- NEW ROBUST LOGIC ---
-        # Instead of trusting the raw output, check for our keywords within it.
-        # This prevents errors if the model outputs "question: user is asking..."
-        # We check for escalation first since it's the most critical.
-        
-        clean_intent = "other" # Default to "other" (ignore)
+        clean_intent = "other" 
         if "escalation_request" in raw_intent_output:
             clean_intent = "escalation_request"
         elif "question" in raw_intent_output:
@@ -164,17 +190,13 @@ def determine_user_intent(last_message_content, config):
         
     except Exception as e:
         print(f"Error determining intent: {e}")
-        # On a hard API error, default to "question" so it still gets a response
         return "question"
 
 def generate_ai_reply(email_subject, conversation_history, config):
     """Generates a standard AI reply for user questions."""
     print("Generating AI reply...")
-    
-    # Load system prompt template and knowledge base from config
     knowledge_base_context = config['knowledge_base']
     system_prompt_template = config['prompts']['ai_reply_system']
-    
     system_prompt = system_prompt_template.format(
         email_subject=email_subject,
         knowledge_base_context=knowledge_base_context
@@ -198,8 +220,6 @@ def send_email(service, to, subject, message_text, thread_id):
     try:
         recipient_email = to.split('<')[-1].strip('>')
         reply_subject = f"Re: {subject}" if not subject.lower().startswith("re:") else subject
-        
-        # Add a footer to identify the bot
         message_text += f"\n\n--- \nThis is an automated reply."
 
         message = MIMEText(message_text)
@@ -227,20 +247,23 @@ def forward_email_to_support(service, user_email, subject, full_conversation_tex
     except HttpError as error:
         print(f"An error occurred while forwarding email: {error}")
 
-def mark_as_read(service, msg_id):
-    """Marks an email as read."""
+# NEW: Replaces mark_as_read. This function marks as read AND applies a label in one API call.
+def modify_message(service, msg_id, add_label_id):
+    """Marks an email as read and applies a specified label."""
     try:
-        service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['UNREAD']}).execute()
+        body = {
+            'removeLabelIds': ['UNREAD'],
+            'addLabelIds': [add_label_id]
+        }
+        service.users().messages().modify(userId='me', id=msg_id, body=body).execute()
     except HttpError as error:
-        print(f"An error occurred while marking as read: {error}")
+        print(f"An error occurred while modifying message: {error}")
 
-def main():
-    # Load configuration on startup
-    config = load_config()
-    service = get_gmail_service()
-    
+# NEW: This function holds the core logic that used to be in main().
+def process_email_batch(service, config, label_ids):
+    """Fetches and processes one batch of unread emails."""
     print("\nStarting Smart Agent Brain... Checking for new messages.")
-    unread_emails = fetch_unread_emails(service)
+    unread_emails = fetch_unread_emails(service, config['labels'])
     
     if not unread_emails:
         print("No new emails found.")
@@ -255,11 +278,10 @@ def main():
             print("Could not fetch conversation history. Skipping.")
             continue
 
-        # Get the content of the very last message in the thread
         last_message = conversation_history[-1]['content']
-
-        # === THIS IS THE NEW SMART LOGIC ===
         intent = determine_user_intent(last_message, config)
+
+        label_to_apply = None
 
         match intent:
             case "question":
@@ -267,23 +289,58 @@ def main():
                 reply_text = generate_ai_reply(email['subject'], conversation_history, config)
                 print(f"Generated Reply: {reply_text[:100]}...")
                 send_email(service, email['from'], email['subject'], reply_text, email['threadId'])
+                label_to_apply = label_ids['replied']
             
             case "escalation_request":
                 print("Action: Escalating to human support.")
                 forward_email_to_support(service, email['from'], email['subject'], full_text, config)
-                # Optionally, send a confirmation reply to the user:
                 confirm_text = "Thank you for reaching out. Your request has been escalated to our human support team, and they will get back to you shortly."
                 send_email(service, email['from'], email['subject'], confirm_text, email['threadId'])
+                label_to_apply = label_ids['escalated']
 
             case "other":
                 print("Action: Intent is 'other' (e.g., spam, feedback). Marking as read and ignoring.")
+                label_to_apply = label_ids['ignored']
             
             case _:
                 print(f"Action: Unknown intent '{intent}'. Defaulting to ignore.")
+                label_to_apply = label_ids['ignored']
 
-        # Mark the original message as read regardless of action
-        mark_as_read(service, email['id'])
+        # NEW: Apply the correct label and mark as read
+        if label_to_apply:
+            modify_message(service, email['id'], label_to_apply)
+        
         print(f"--- Finished processing email {email['id']} ---")
+
+
+# NEW: The main() function is now a launcher and a persistent loop
+def main():
+    config = load_config()
+    service = get_gmail_service()
+    
+    # NEW: On startup, get the IDs for our labels
+    print("Setting up Gmail labels...")
+    label_ids = {
+        "replied": get_or_create_label_id(service, config['labels']['replied']),
+        "escalated": get_or_create_label_id(service, config['labels']['escalated']),
+        "ignored": get_or_create_label_id(service, config['labels']['ignored'])
+    }
+    print("Label setup complete. Bot is now running...")
+    
+    interval = config['settings']['polling_interval_seconds']
+    
+    # NEW: This is the main bot loop
+    try:
+        while True:
+            process_email_batch(service, config, label_ids)
+            print(f"Cycle complete. Sleeping for {interval} seconds. (Press Ctrl+C to stop)")
+            time.sleep(interval)
+            
+    except KeyboardInterrupt:
+        print("\nShutdown signal received. Exiting bot.")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred in the main loop: {e}")
+        print("Bot is stopping.")
 
 if __name__ == "__main__":
     main()
