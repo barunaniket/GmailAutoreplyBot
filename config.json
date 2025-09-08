@@ -12,7 +12,7 @@
     "escalated": "Bot: Escalated",
     "ignored": "Bot: Ignored"
   },
-  "knowledge_base": "Our return policy is 30 days. We ship to the US and Canada. For technical issues, ask the user to describe the steps they have already tried.",
+  "knowledge_base": "",
   "prompts": {
     "intent_classifier": "Analyze the following email and classify its primary intent based ONLY on the categories provided. \n\nCategories:\n- \"question\": The user is asking for help, information, or how to do something.\n- \"escalation_request\": The user is explicitly asking for a human, a support agent, to create a ticket, or expresses strong frustration/anger.\n- \"other\": The post is a general comment, feedback, spam, or does not fit the other categories.\n\nEmail: \"{last_message_content}\"\n\nRespond with ONLY the single keyword for the category and nothing else. \nCategory:",
     "ai_reply_system": "You are an expert AI support assistant for the email thread with subject \"{email_subject}\". \nInstructions: Use the KNOWLEDGE BASE. Analyze the conversation history for context, but focus on the latest post from the user. \n- Be concise, professional, and helpful. Do not write very long replies. \n- If you don't know the answer, politely state that you will escalate this to a human agent. \n--- KNOWLEDGE BASE --- \n{knowledge_base_context}"
