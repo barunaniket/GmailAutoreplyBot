@@ -18,11 +18,18 @@ load_dotenv()
 # Added gmail.labels scope to manage labels
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.labels"]
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
-if not openai.api_key:
-    print("ERROR: OpenAI API key not found.")
-    print("Please set the OPENAI_API_KEY in your .env file.")
+# --- START OF CHANGE ---
+# Explicitly initialize the OpenAI client
+try:
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if not client.api_key:
+        print("ERROR: OpenAI API key not found.")
+        print("Please set the OPENAI_API_KEY in your .env file.")
+        sys.exit(1)
+except Exception as e:
+    print(f"ERROR: Failed to initialize OpenAI client: {e}")
     sys.exit(1)
+# --- END OF CHANGE ---
 
 def load_config():
     """Loads the configuration from config.json."""
@@ -170,7 +177,8 @@ def determine_user_intent(last_message_content, config):
     intent_prompt = intent_prompt_template.format(last_message_content=last_message_content)
     
     try:
-        response = openai.chat.completions.create(
+        # --- CHANGE: Use the initialized client ---
+        response = client.chat.completions.create(
             model=config['settings']['openai_model'],
             messages=[{"role": "user", "content": intent_prompt}],
             max_tokens=config['settings']['max_intent_tokens'],
@@ -208,7 +216,8 @@ def generate_ai_reply(email_subject, conversation_history, config):
     messages_for_api = [{"role": "system", "content": system_prompt}] + conversation_history
     
     try:
-        response = openai.chat.completions.create(
+        # --- CHANGE: Use the initialized client ---
+        response = client.chat.completions.create(
             model=config['settings']['openai_model'],
             messages=messages_for_api,
             max_tokens=config['settings']['max_reply_tokens']
