@@ -3,8 +3,9 @@ import base64
 import json
 import sys
 import re
-import time  # For the polling loop
+import time
 import openai
+import uuid
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -15,22 +16,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Added gmail.labels scope to manage labels
+# --- Client Initialization ---
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.labels"]
 
-# --- START OF CHANGE ---
-# Explicitly initialize the OpenAI client
 try:
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     if not client.api_key:
-        print("ERROR: OpenAI API key not found.")
-        print("Please set the OPENAI_API_KEY in your .env file.")
+        print("ERROR: OpenAI API key not found in .env file.")
         sys.exit(1)
 except Exception as e:
     print(f"ERROR: Failed to initialize OpenAI client: {e}")
     sys.exit(1)
-# --- END OF CHANGE ---
 
+# --- New Functions for API Communication ---
+def log_activity(state, from_email, intent, action):
+    """Adds a new entry to the shared activity log."""
+    print(f"LOGGING: From: {from_email}, Intent: {intent}, Action: {action}")
+    log_entry = {
+        "id": uuid.uuid4().hex,
+        "from": from_email,
+        "intent": intent,
+        "action": action,
+        "time": time.strftime("%H:%M:%S")
+    }
+    # Insert at the beginning to show newest first
+    if 'activity_log' in state:
+        state['activity_log'].insert(0, log_entry)
+
+def increment_stat(state, key):
+    """Increments a stat in the shared state."""
+    if 'stats' in state:
+        stats = state.get('stats', {"processed": 0, "replied": 0, "escalated": 0, "ignored": 0})
+        stats[key] += 1
+        state['stats'] = stats
+
+# --- Core Bot Functions (Unchanged from your original file) ---
 def load_config():
     """Loads the configuration from config.json."""
     try:
@@ -57,10 +77,10 @@ def get_gmail_service():
                 creds.refresh(Request())
             except Exception as e:
                 print(f"Token refresh failed: {e}. Deleting token.json for re-authentication.")
-                os.remove("token.json")  # Delete bad token
-                creds = None  # Force re-auth
+                os.remove("token.json")
+                creds = None
         
-        if not creds:  # Run auth flow if no creds or refresh failed
+        if not creds:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
         
@@ -79,9 +99,7 @@ def get_or_create_label_id(service, label_name):
             if label['name'].lower() == label_name.lower():
                 return label['id']
         
-        # Label not found, create it
         print(f"Label '{label_name}' not found. Creating it...")
-        # CORRECTED LINE: messageListVisibility must be 'show'
         label_body = {'name': label_name, 'labelListVisibility': 'labelShow', 'messageListVisibility': 'show'}
         created_label = service.users().labels().create(userId='me', body=label_body).execute()
         print(f"Label created with ID: {created_label['id']}")
@@ -139,10 +157,7 @@ def fetch_thread_history(service, thread_id):
         return [], ""
 
 def fetch_unread_emails(service, label_config):
-    """
-    Fetches unread emails, EXCLUDING any that have already been processed by the bot.
-    """
-    # Build a query to exclude emails we've already labeled
+    """Fetches unread emails, EXCLUDING any that have already been processed by the bot."""
     labels_to_exclude = " ".join([f"-label:\"{name}\"" for name in label_config.values()])
     query = f"is:unread {labels_to_exclude}"
     print(f"Searching with query: {query}")
@@ -168,16 +183,12 @@ def fetch_unread_emails(service, label_config):
         return []
 
 def determine_user_intent(last_message_content, config):
-    """
-    Uses OpenAI to classify the user's intent. Robustly checks response.
-    UPDATED: Includes "follow_up" check.
-    """
+    """Uses OpenAI to classify the user's intent."""
     print("Determining user intent...")
     intent_prompt_template = config['prompts']['intent_classifier']
     intent_prompt = intent_prompt_template.format(last_message_content=last_message_content)
     
     try:
-        # --- CHANGE: Use the initialized client ---
         response = client.chat.completions.create(
             model=config['settings']['openai_model'],
             messages=[{"role": "user", "content": intent_prompt}],
@@ -191,7 +202,7 @@ def determine_user_intent(last_message_content, config):
             clean_intent = "escalation_request"
         elif "question" in raw_intent_output:
             clean_intent = "question"
-        elif "follow_up" in raw_intent_output:  # <-- UPGRADE 2 LOGIC
+        elif "follow_up" in raw_intent_output:
             clean_intent = "follow_up"
         elif "other" in raw_intent_output:
             clean_intent = "other"
@@ -201,7 +212,7 @@ def determine_user_intent(last_message_content, config):
         
     except Exception as e:
         print(f"Error determining intent: {e}")
-        return "question"
+        return "question" # Default to question on error to be safe
 
 def generate_ai_reply(email_subject, conversation_history, config):
     """Generates a standard AI reply for user questions."""
@@ -216,7 +227,6 @@ def generate_ai_reply(email_subject, conversation_history, config):
     messages_for_api = [{"role": "system", "content": system_prompt}] + conversation_history
     
     try:
-        # --- CHANGE: Use the initialized client ---
         response = client.chat.completions.create(
             model=config['settings']['openai_model'],
             messages=messages_for_api,
@@ -238,7 +248,7 @@ def send_email(service, to, subject, message_text, thread_id):
         message['to'], message['from'], message['subject'] = recipient_email, 'me', reply_subject
         raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
         body = {'raw': raw_message, 'threadId': thread_id}
-        sent_message = service.users().messages().send(userId='me', body=body).execute()
+        service.users().messages().send(userId='me', body=body).execute()
         print(f"Email reply sent to {recipient_email}.")
     except HttpError as error:
         print(f"An error occurred while sending email: {error}")
@@ -270,7 +280,9 @@ def modify_message(service, msg_id, add_label_id):
     except HttpError as error:
         print(f"An error occurred while modifying message: {error}")
 
-def process_email_batch(service, config, label_ids):
+
+# --- Updated Processing Loop ---
+def process_email_batch(service, config, label_ids, state):
     """Fetches and processes one batch of unread emails."""
     print("\nStarting Smart Agent Brain... Checking for new messages.")
     unread_emails = fetch_unread_emails(service, config['labels'])
@@ -281,6 +293,7 @@ def process_email_batch(service, config, label_ids):
 
     print(f"\n--- Found {len(unread_emails)} new emails ---")
     for email in unread_emails:
+        increment_stat(state, 'processed')
         print(f"\nProcessing email from: {email['from']} | Subject: {email['subject']}")
         
         conversation_history, full_text = fetch_thread_history(service, email['threadId'])
@@ -292,45 +305,50 @@ def process_email_batch(service, config, label_ids):
         intent = determine_user_intent(last_message, config)
 
         label_to_apply = None
+        action_taken = "Unknown"
 
-        # UPDATED: Includes the new "follow_up" case
         match intent:
             case "question":
-                print("Action: Generating AI reply.")
+                action_taken = "Replied"
+                print(f"Action: {action_taken}")
                 reply_text = generate_ai_reply(email['subject'], conversation_history, config)
-                print(f"Generated Reply: {reply_text[:100]}...")
                 send_email(service, email['from'], email['subject'], reply_text, email['threadId'])
                 label_to_apply = label_ids['replied']
+                increment_stat(state, 'replied')
             
             case "escalation_request":
-                print("Action: Escalating to human support.")
+                action_taken = "Escalated"
+                print(f"Action: {action_taken}")
                 forward_email_to_support(service, email['from'], email['subject'], full_text, config)
-                confirm_text = "Thank you for reaching out. Your request has been escalated to our human support team, and they will get back to you shortly."
+                confirm_text = "Your request has been escalated to our human support team."
                 send_email(service, email['from'], email['subject'], confirm_text, email['threadId'])
                 label_to_apply = label_ids['escalated']
+                increment_stat(state, 'escalated')
 
-            case "follow_up":  # <-- UPGRADE 2 LOGIC
-                print("Action: Follow-up detected (e.g., 'Thanks'). Marking as read and applying 'ignored' label.")
+            case "follow_up" | "other":
+                action_taken = "Ignored"
+                print(f"Action: {action_taken}")
                 label_to_apply = label_ids['ignored']
-
-            case "other":
-                print("Action: Intent is 'other' (e.g., spam, feedback). Marking as read and ignoring.")
-                label_to_apply = label_ids['ignored']
+                increment_stat(state, 'ignored')
             
             case _:
+                action_taken = "Ignored"
                 print(f"Action: Unknown intent '{intent}'. Defaulting to ignore.")
                 label_to_apply = label_ids['ignored']
+                increment_stat(state, 'ignored')
 
         if label_to_apply:
             modify_message(service, email['id'], label_to_apply)
         
+        log_activity(state, email['from'], intent.capitalize(), action_taken)
         print(f"--- Finished processing email {email['id']} ---")
 
-
-def main():
+# --- Updated Main Function ---
+def main(state, log_queue):
     """
-    Main function to run the bot: sets up config, auth, labels, and starts the infinite polling loop.
+    Main function to run the bot, now controlled by the API.
     """
+    state['bot_status'] = 'Running'
     config = load_config()
     service = get_gmail_service()
     
@@ -340,21 +358,59 @@ def main():
         "escalated": get_or_create_label_id(service, config['labels']['escalated']),
         "ignored": get_or_create_label_id(service, config['labels']['ignored'])
     }
-    print("Label setup complete. Bot is now running...")
+    print("Label setup complete. Bot is now polling for emails...")
     
+    # Initialize stats in shared state
+    state['stats'] = {"processed": 0, "replied": 0, "escalated": 0, "ignored": 0}
+
     interval = config['settings']['polling_interval_seconds']
     
     try:
         while True:
-            process_email_batch(service, config, label_ids)
-            print(f"Cycle complete. Sleeping for {interval} seconds. (Press Ctrl+C to stop)")
+            process_email_batch(service, config, label_ids, state)
+            print(f"Cycle complete. Sleeping for {interval} seconds.")
             time.sleep(interval)
             
-    except KeyboardInterrupt:
-        print("\nShutdown signal received. Exiting bot.")
+    except (KeyboardInterrupt, SystemExit):
+        print("\nShutdown signal received in bot process.")
     except Exception as e:
-        print(f"\nAn unexpected error occurred in the main loop: {e}")
-        print("Bot is stopping.")
+        print(f"\nAn unexpected error occurred in the bot loop: {e}")
+        state['bot_status'] = 'Error'
+    finally:
+        state['bot_status'] = 'Offline'
+        print("Bot polling has stopped.")
 
 if __name__ == "__main__":
-    main()
+    # This block allows running main.py directly for testing purposes,
+    # but it won't be connected to the API's shared state.
+    print("Running bot in standalone mode. API control will not be available.")
+    
+    # Create dummy state and queue objects for standalone mode
+    class DummyState:
+        def __init__(self):
+            self._dict = {
+                "activity_log": [], 
+                "stats": {"processed": 0, "replied": 0, "escalated": 0, "ignored": 0}
+            }
+        def __getitem__(self, key):
+            return self._dict.get(key)
+        def __setitem__(self, key, value):
+            self._dict[key] = value
+        def get(self, key, default=None):
+            return self._dict.get(key, default)
+        def insert(self, index, value): # Dummy for activity_log
+            self._dict["activity_log"].insert(index, value)
+
+    class DummyQueue:
+        def put(self, item):
+            print(f"DUMMY LOG: {item}")
+            
+    # Need a manager for the list proxy
+    from multiprocessing import Manager
+    manager = Manager()
+    dummy_state = manager.dict()
+    dummy_state['activity_log'] = manager.list()
+    dummy_state['stats'] = manager.dict({"processed": 0, "replied": 0, "escalated": 0, "ignored": 0})
+
+
+    main(dummy_state, DummyQueue())

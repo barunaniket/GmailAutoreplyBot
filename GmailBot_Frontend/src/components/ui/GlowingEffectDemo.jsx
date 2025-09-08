@@ -1,8 +1,9 @@
 "use client";
 import React from "react";
 import { Box, Lock, Search, Settings, Sparkles } from "lucide-react";
-import { GlowingEffect } from "./glowing-effect"; // Adjusted import path
+import { GlowingEffect } from "./glowing-effect.jsx";
 
+// Make sure "export default" is here
 export default function GlowingEffectDemo() {
   return (
     <ul className="grid grid-cols-1 grid-rows-none gap-4 md:grid-cols-12 md:grid-rows-3 lg:gap-4 xl:max-h-[34rem] xl:grid-rows-2">
