@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { GridBackground } from './components/ui/grid-background'; // Import the new grid
+import { GridBackground } from './components/ui/grid-background';
+import { CardSpotlight } from './components/ui/card-spotlight';
 
 // The base URL for your backend API
 const API_URL = 'http://localhost:5001/api';
@@ -81,16 +82,16 @@ function App() {
   };
 
   // --- UI Rendering ---
-  const statusColor = botStatus === 'Running' ? 'bg-green-500' : 
+  const statusColor = botStatus === 'Running' ? 'bg-green-500' :
                       botStatus === 'Offline' ? 'bg-red-500' : 'bg-yellow-500';
 
   return (
     <GridBackground className="min-h-screen font-sans text-white">
-      <div className="relative z-10 container mx-auto p-8">
-        
+      <div className="relative z-10 container mx-auto p-8 w-full">
+
         {/* Header */}
-        <header className="flex justify-between items-center mb-10">
-          <h1 className="text-4xl font-bold text-gray-100">Gmail AutoReply Bot</h1>
+        <header className="flex flex-col md:flex-row justify-between items-center mb-10 space-y-4 md:space-y-0">
+          <h1 className="text-4xl font-bold text-gray-100 text-center md:text-left">Gmail AutoReply Bot</h1>
           <div className="flex items-center space-x-4">
             <span className={`w-4 h-4 rounded-full animate-pulse ${statusColor}`}></span>
             <span className="text-lg font-semibold">{botStatus}</span>
@@ -98,15 +99,15 @@ function App() {
         </header>
 
         {/* Controls */}
-        <div className="mb-10 flex space-x-4">
-          <button 
-            onClick={handleStartBot} 
+        <div className="mb-12 flex justify-center md:justify-start space-x-4">
+          <button
+            onClick={handleStartBot}
             disabled={botStatus === 'Running'}
             className="bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-white font-bold py-3 px-6 rounded-lg transition-colors duration-300 disabled:bg-zinc-600 disabled:cursor-not-allowed">
             Start Bot
           </button>
-          <button 
-            onClick={handleStopBot} 
+          <button
+            onClick={handleStopBot}
             disabled={botStatus !== 'Running'}
             className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-colors duration-300 disabled:bg-zinc-600 disabled:cursor-not-allowed">
             Stop Bot
@@ -114,27 +115,27 @@ function App() {
         </div>
 
         {/* Main Content Area */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="flex flex-col gap-8">
 
           {/* Stats Section */}
-          <div className="lg:col-span-1 bg-black/50 backdrop-blur-sm border border-zinc-800 p-6 rounded-lg shadow-lg">
-            <h2 className="text-2xl font-semibold mb-6">Statistics</h2>
-            <div className="grid grid-cols-2 gap-4 text-center">
+          <div>
+             <h2 className="text-2xl font-semibold mb-6 text-center md:text-left">Statistics</h2>
+             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
                 {Object.entries(stats).map(([key, value]) => (
-                    <div key={key} className="bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg">
-                        <p className="text-4xl font-bold">{isLoading ? '...' : value}</p>
-                        <p className="text-zinc-400 capitalize">{key}</p>
-                    </div>
+                    <CardSpotlight key={key} className="text-center p-8">
+                        <p className="text-4xl font-bold text-white z-10 relative">{isLoading ? '...' : value}</p>
+                        <p className="text-zinc-400 capitalize mt-2 z-10 relative">{key}</p>
+                    </CardSpotlight>
                 ))}
             </div>
           </div>
 
           {/* Activity Log Section */}
-          <div className="lg:col-span-2 bg-black/50 backdrop-blur-sm border border-zinc-800 p-6 rounded-lg shadow-lg">
+          <div className="bg-black/50 backdrop-blur-sm border border-zinc-800 p-6 rounded-lg shadow-lg">
             <h2 className="text-2xl font-semibold mb-6">Activity Log</h2>
             <div className="overflow-x-auto h-96 overflow-y-auto">
               <table className="w-full text-left">
-                <thead className="border-b border-zinc-700">
+                <thead className="border-b border-zinc-700 sticky top-0 bg-black/50 backdrop-blur-sm">
                   <tr>
                     <th className="py-3 px-4">From</th>
                     <th className="py-3 px-4">Intent</th>
