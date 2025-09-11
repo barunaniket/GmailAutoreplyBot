@@ -1,4 +1,4 @@
-climport os.path
+import os.path
 import base64
 import json
 import sys
